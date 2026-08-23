@@ -3,34 +3,11 @@ MLX backend implementation for TTS and STT using mlx-audio.
 """
 
 from typing import Optional, List, Tuple
-import asyncio
-import concurrent.futures
 import logging
 import numpy as np
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-# MLX binds its Metal/GPU stream to whichever OS thread first touches it.
-# asyncio.to_thread() dispatches to the process-wide *shared* default
-# ThreadPoolExecutor -- any other endpoint's blocking work (profile
-# uploads, effects processing, model migration, MCP tool calls) can also
-# land on that pool and grow it past 1 worker, independently of anything
-# this module does. Once that happens, a later MLX call can be handed to
-# a "fresh" thread that never initialized an MLX stream and crashes with
-# "RuntimeError: There is no Stream(gpu, N) in current thread" (sometimes
-# escalating to a fatal Metal exception that kills the process).
-#
-# Route every MLX-touching call through this dedicated, single-worker
-# executor instead. With exactly one worker, the same OS thread is
-# guaranteed to run every MLX call for the lifetime of the process,
-# regardless of what the shared default executor is doing elsewhere.
-_mlx_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-worker")
-
-
-async def _run_on_mlx_thread(func, *args):
-    """Run func(*args) on the dedicated single MLX worker thread."""
-    return await asyncio.get_running_loop().run_in_executor(_mlx_executor, func, *args)
 
 # PATCH: Import and apply offline patch BEFORE any huggingface_hub usage
 # This prevents mlx_audio from making network requests when models are cached
@@ -40,7 +17,12 @@ patch_huggingface_hub_offline()
 ensure_original_qwen_config_cached()
 
 from . import TTSBackend, STTBackend, LANGUAGE_CODE_TO_NAME, WHISPER_HF_REPOS
-from .base import is_model_cached, combine_voice_prompts as _combine_voice_prompts, model_load_progress
+from .base import (
+    is_model_cached,
+    combine_voice_prompts as _combine_voice_prompts,
+    model_load_progress,
+    run_on_mlx_thread as _run_on_mlx_thread,
+)
 from ..utils.cache import get_cache_key, get_cached_voice_prompt, cache_voice_prompt
 
 
