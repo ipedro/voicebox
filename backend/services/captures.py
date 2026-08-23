@@ -72,7 +72,7 @@ async def create_capture(
 
     capture_id = str(uuid.uuid4())
     suffix = Path(filename).suffix.lower() or ".wav"
-    if suffix not in (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"):
+    if suffix not in (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm", ".opus"):
         suffix = ".wav"
 
     raw_path = config.get_captures_dir() / f"{capture_id}{suffix}"
