@@ -117,6 +117,38 @@ async def test_mapped_language_reaches_generate_custom_voice():
     assert kwargs["language"] == "portuguese"
 
 
+# ── 3b. instruct kwarg omission for falsy values (parity with PyTorch's
+#        `if instruct: kwargs["instruct"] = instruct` guard) ──────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("falsy_instruct", [None, ""])
+async def test_falsy_instruct_is_omitted_not_passed_empty(falsy_instruct):
+    """qwen_custom_voice_backend.py (PyTorch) only sets kwargs["instruct"]
+    when instruct is truthy -- an explicit "" is never sent. Mirror that
+    exactly rather than passing instruct=None/instruct="" unconditionally,
+    so the two backends send an identical kwarg set for the same call.
+    """
+    backend, mock_model = _make_loaded_backend()
+    mock_model.generate_custom_voice.return_value = iter([_fake_result(np.zeros(10, dtype=np.float32))])
+
+    await backend.generate("hello", {"preset_voice_id": "Ryan"}, language="en", instruct=falsy_instruct)
+
+    _args, kwargs = mock_model.generate_custom_voice.call_args
+    assert "instruct" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_truthy_instruct_is_passed_through():
+    backend, mock_model = _make_loaded_backend()
+    mock_model.generate_custom_voice.return_value = iter([_fake_result(np.zeros(10, dtype=np.float32))])
+
+    await backend.generate("hello", {"preset_voice_id": "Ryan"}, language="en", instruct="speak angrily")
+
+    _args, kwargs = mock_model.generate_custom_voice.call_args
+    assert kwargs["instruct"] == "speak angrily"
+
+
 # ── 4. create_voice_prompt() returns real dict, not NotImplementedError ──
 
 

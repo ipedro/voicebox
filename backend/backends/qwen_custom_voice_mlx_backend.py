@@ -223,12 +223,17 @@ class QwenCustomVoiceMLXBackend:
             audio_chunks = []
             sample_rate = 24000
 
-            for result in self.model.generate_custom_voice(
-                text=text,
-                speaker=speaker,
-                language=lang,
-                instruct=instruct,
-            ):
+            # Mirror the PyTorch backend's guard (qwen_custom_voice_backend.py):
+            # omit the kwarg entirely for a falsy instruct rather than passing
+            # "". The model's own _prepare_generation_inputs already treats
+            # "" and None identically (a truthiness check), so this has no
+            # effect on the actual audio -- kept for exact call-shape parity
+            # with the PyTorch path, in case that internal check ever changes.
+            kwargs = {"text": text, "speaker": speaker, "language": lang}
+            if instruct:
+                kwargs["instruct"] = instruct
+
+            for result in self.model.generate_custom_voice(**kwargs):
                 audio_chunks.append(np.array(result.audio))
                 sample_rate = result.sample_rate
 
