@@ -16,6 +16,7 @@ from ..app import safe_content_disposition
 from ..database import VoiceProfile as DBVoiceProfile, get_db
 from ..services import channels, export_import, personality, profiles
 from ..services.profiles import _profile_to_response
+from ..utils.audio import ALLOWED_AUDIO_EXTS
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +159,8 @@ async def add_profile_sample(
     db: Session = Depends(get_db),
 ):
     """Add a sample to a voice profile."""
-    _allowed_audio_exts = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".webm", ".opus"}
     _uploaded_ext = Path(file.filename or "").suffix.lower()
-    file_suffix = _uploaded_ext if _uploaded_ext in _allowed_audio_exts else ".wav"
+    file_suffix = _uploaded_ext if _uploaded_ext in ALLOWED_AUDIO_EXTS else ".wav"
 
     with tempfile.NamedTemporaryFile(suffix=file_suffix, delete=False) as tmp:
         total_size = 0

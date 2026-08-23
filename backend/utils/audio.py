@@ -11,6 +11,11 @@ import librosa
 import numpy as np
 import soundfile as sf
 
+# Extensions accepted for uploaded audio (voice samples, transcription
+# uploads). librosa picks its decoder from the file extension, so any temp
+# file written from an upload has to keep it.
+ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".webm", ".opus"}
+
 
 def normalize_audio(
     audio: np.ndarray,

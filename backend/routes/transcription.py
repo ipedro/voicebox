@@ -8,15 +8,12 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from .. import models
 from ..services import transcribe
 from ..services.task_queue import create_background_task
+from ..utils.audio import ALLOWED_AUDIO_EXTS
 from ..utils.tasks import get_task_manager
 
 router = APIRouter()
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
-
-# Same set profiles.py accepts for voice samples. librosa picks its decoder from the
-# file extension, so the temp file has to keep the uploaded one.
-ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".webm", ".opus"}
 
 
 @router.post("/transcribe", response_model=models.TranscriptionResponse)
