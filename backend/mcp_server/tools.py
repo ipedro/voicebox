@@ -7,7 +7,6 @@ the Python function name stays snake_case.
 
 from __future__ import annotations
 
-import asyncio
 import base64 as b64
 import logging
 import tempfile
@@ -299,7 +298,7 @@ async def _transcribe_file(
 ) -> dict[str, Any]:
     from ..backends import WHISPER_HF_REPOS
     from ..services import transcribe as transcribe_service
-    from ..utils.audio import load_audio
+    from ..utils.audio import prepare_for_stt
 
     whisper = transcribe_service.get_whisper_model()
     model_size = model or whisper.model_size
@@ -309,22 +308,31 @@ async def _transcribe_file(
             f"Invalid STT model '{model_size}'. Must be one of: {', '.join(valid)}"
         )
 
-    # load_audio is sync; keep the event loop responsive.
-    audio, sr = await asyncio.to_thread(load_audio, str(path))
-    duration = len(audio) / sr
+    # The STT backend's miniaudio decoder can't read every format this
+    # accepts (e.g. Opus), so decode + conditionally re-encode to a temp
+    # WAV before handing anything to whisper -- same as the /transcribe
+    # HTTP route.
+    stt_path = str(path)
+    is_temp = False
+    try:
+        audio, sr, stt_path, is_temp = await prepare_for_stt(str(path))
+        duration = len(audio) / sr
 
-    if (
-        not whisper.is_loaded() or whisper.model_size != model_size
-    ) and not whisper._is_model_cached(model_size):
-        raise ValueError(
-            f"Whisper model '{model_size}' is not yet downloaded. Open "
-            "Voicebox → Settings → Models to download it first."
-        )
+        if (
+            not whisper.is_loaded() or whisper.model_size != model_size
+        ) and not whisper._is_model_cached(model_size):
+            raise ValueError(
+                f"Whisper model '{model_size}' is not yet downloaded. Open "
+                "Voicebox → Settings → Models to download it first."
+            )
 
-    text = await whisper.transcribe(str(path), language, model_size)
-    return {
-        "text": text,
-        "duration": duration,
-        "language": language,
-        "model": model_size,
-    }
+        text = await whisper.transcribe(stt_path, language, model_size)
+        return {
+            "text": text,
+            "duration": duration,
+            "language": language,
+            "model": model_size,
+        }
+    finally:
+        if is_temp:
+            Path(stt_path).unlink(missing_ok=True)
