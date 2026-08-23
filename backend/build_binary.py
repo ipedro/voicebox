@@ -429,6 +429,8 @@ def build_server(cuda=False, rocm=False):
                 "--hidden-import",
                 "backend.backends.qwen_voice_design_backend",
                 "--hidden-import",
+                "backend.backends.qwen_custom_voice_mlx_backend",
+                "--hidden-import",
                 "mlx",
                 "--hidden-import",
                 "mlx.core",
