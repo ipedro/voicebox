@@ -2,10 +2,14 @@
 Audio processing utilities.
 """
 
+import asyncio
+import tempfile
+from pathlib import Path
+from typing import Optional, Tuple
+
+import librosa
 import numpy as np
 import soundfile as sf
-import librosa
-from typing import Tuple, Optional
 
 
 def normalize_audio(
@@ -108,6 +112,54 @@ def save_audio(
             pass  # Best effort cleanup
 
         raise OSError(f"Failed to save audio to {path}: {e}") from e
+
+
+async def prepare_for_stt(path: str) -> tuple[np.ndarray, int, str, bool]:
+    """
+    Decode ``path`` and, unless it's already a WAV, re-encode it to a temp
+    WAV the STT backend's decoder can read.
+
+    The STT backend (mlx_audio.stt -> miniaudio) only decodes WAV/FLAC/MP3/
+    Vorbis directly -- not every format librosa/soundfile can read (e.g.
+    Opus). Decode once here via ``load_audio`` (librosa, with its
+    audioread/ffmpeg fallback for exotic containers) and, if the source
+    isn't a WAV, write that decoded PCM back out as WAV so the STT backend
+    always gets something it can open natively.
+
+    Args:
+        path: Path to the source audio file.
+
+    Returns:
+        Tuple of (audio, sample_rate, stt_path, is_temp). ``stt_path`` is
+        ``path`` unchanged when no re-encode was needed (``is_temp=False``),
+        or a freshly created temp WAV (``is_temp=True``) that the caller
+        owns and must remove (e.g. in a ``finally`` block).
+    """
+    # This is plain CPU-bound librosa/soundfile decoding, not an MLX call --
+    # it must not go through run_on_mlx_thread/mlx_executor (backends/base.py).
+    # Routing ordinary audio decoding through that single-worker executor
+    # would serialize it behind MLX inference for no reason.
+    audio, sr = await asyncio.to_thread(load_audio, path)
+
+    if Path(path).suffix.lower() == ".wav":
+        return audio, sr, path, False
+
+    # A dedicated tempfile, not a path derived from `path` (e.g. `path +
+    # ".stt.wav"`) -- this helper is also called with arbitrary caller-
+    # supplied paths (MCP tool), which could point anywhere, including a
+    # read-only directory. Writing beside the source file isn't safe there.
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        stt_path = tmp.name
+
+    try:
+        await asyncio.to_thread(save_audio, audio, stt_path, sr)
+    except Exception:
+        # Caller only learns about (and cleans up) stt_path on a successful
+        # return -- if the write itself fails, the empty temp file would
+        # otherwise leak.
+        Path(stt_path).unlink(missing_ok=True)
+        raise
+    return audio, sr, stt_path, True
 
 
 def has_tts_runaway(
