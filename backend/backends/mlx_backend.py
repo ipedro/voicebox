@@ -271,7 +271,7 @@ class MLXTTSBackend:
 class MLXSTTBackend:
     """MLX-based STT backend using mlx-audio Whisper."""
 
-    def __init__(self, model_size: str = "base"):
+    def __init__(self, model_size: str = "turbo"):
         self.model = None
         self.model_size = model_size
 
