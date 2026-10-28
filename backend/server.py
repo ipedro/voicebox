@@ -294,13 +294,10 @@ if __name__ == "__main__":
         database.init_db()
         logger.info("Database initialized successfully")
 
+        from backend.utils.listeners import run
+
         logger.info(f"Starting uvicorn server on {args.host}:{args.port}...")
-        uvicorn.run(
-            app,
-            host=args.host,
-            port=args.port,
-            log_level="info",
-        )
+        run(app, host=args.host, port=args.port, log_level="info")
     except Exception as e:
         logger.error(f"Server startup failed: {e}", exc_info=True)
         sys.exit(1)
