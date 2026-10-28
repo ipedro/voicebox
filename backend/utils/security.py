@@ -1,3 +1,4 @@
+import hmac
 import os
 import logging
 import ipaddress
@@ -85,7 +86,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
 
             if api_key:
                 # Enforce API key verification for all remote requests
-                if not token or token != api_key:
+                if not token or not hmac.compare_digest(token.encode(), api_key.encode()):
                     return JSONResponse(
                         status_code=401,
                         content={"detail": "Unauthorized: Invalid or missing API token"},
