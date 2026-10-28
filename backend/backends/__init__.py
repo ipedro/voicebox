@@ -211,6 +211,7 @@ _llm_backends_lock = threading.Lock()
 TTS_ENGINES = {
     "qwen": "Qwen TTS",
     "qwen_custom_voice": "Qwen CustomVoice",
+    "qwen_voice_design": "Qwen VoiceDesign",
     "luxtts": "LuxTTS",
     "chatterbox": "Chatterbox TTS",
     "chatterbox_turbo": "Chatterbox Turbo",
@@ -264,15 +265,33 @@ def _get_qwen_model_configs() -> list[ModelConfig]:
 
 
 def _get_qwen_custom_voice_configs() -> list[ModelConfig]:
-    """Return Qwen CustomVoice model configs."""
+    """Return Qwen CustomVoice model configs with backend-aware HF repo IDs.
+
+    Mirrors _get_qwen_model_configs()'s exact pattern: MLX bf16
+    conversions on Apple Silicon, upstream PyTorch weights elsewhere.
+    retries_runaway=True only on MLX -- same reasoning as qwen/
+    qwen_voice_design (MLX-only EOS-miss runaway failure mode; PyTorch
+    doesn't need the retry).
+    """
+    backend_type = get_backend_type()
+    if backend_type == "mlx":
+        repo_1_7b = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-bf16"
+        repo_0_6b = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16"
+    else:
+        repo_1_7b = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+        repo_0_6b = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+
+    retries_runaway = backend_type == "mlx"
+
     return [
         ModelConfig(
             model_name="qwen-custom-voice-1.7B",
             display_name="Qwen CustomVoice 1.7B",
             engine="qwen_custom_voice",
-            hf_repo_id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+            hf_repo_id=repo_1_7b,
             model_size="1.7B",
             size_mb=3500,
+            retries_runaway=retries_runaway,
             supports_instruct=True,
             languages=["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
         ),
@@ -280,9 +299,38 @@ def _get_qwen_custom_voice_configs() -> list[ModelConfig]:
             model_name="qwen-custom-voice-0.6B",
             display_name="Qwen CustomVoice 0.6B",
             engine="qwen_custom_voice",
-            hf_repo_id="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+            hf_repo_id=repo_0_6b,
             model_size="0.6B",
             size_mb=1200,
+            retries_runaway=retries_runaway,
+            supports_instruct=True,
+            languages=["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+        ),
+    ]
+
+
+def _get_qwen_voice_design_configs() -> list[ModelConfig]:
+    """Return Qwen VoiceDesign model configs.
+
+    MLX-only (no PyTorch conversion exists yet) and single-size -- only
+    1.7B is published, unlike qwen/qwen_custom_voice which ship 1.7B and
+    0.6B variants.
+
+    retries_runaway=True unconditionally (no backend_type branch needed,
+    unlike _get_qwen_model_configs): this is the same mlx-audio qwen3_tts
+    model class and decode loop as the Base engine, which is where
+    ac3fafd's EOS-miss runaway detection was added -- VoiceDesign is
+    exposed to the identical failure mode.
+    """
+    return [
+        ModelConfig(
+            model_name="qwen-voice-design-1.7B",
+            display_name="Qwen VoiceDesign 1.7B",
+            engine="qwen_voice_design",
+            hf_repo_id="mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16",
+            model_size="1.7B",
+            size_mb=3500,
+            retries_runaway=True,
             supports_instruct=True,
             languages=["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
         ),
@@ -471,6 +519,7 @@ def get_all_model_configs() -> list[ModelConfig]:
     return (
         _get_qwen_model_configs()
         + _get_qwen_custom_voice_configs()
+        + _get_qwen_voice_design_configs()
         + _get_non_qwen_tts_configs()
         + _get_whisper_configs()
         + _get_qwen_llm_configs()
@@ -479,7 +528,12 @@ def get_all_model_configs() -> list[ModelConfig]:
 
 def get_tts_model_configs() -> list[ModelConfig]:
     """Return only TTS model configs."""
-    return _get_qwen_model_configs() + _get_qwen_custom_voice_configs() + _get_non_qwen_tts_configs()
+    return (
+        _get_qwen_model_configs()
+        + _get_qwen_custom_voice_configs()
+        + _get_qwen_voice_design_configs()
+        + _get_non_qwen_tts_configs()
+    )
 
 
 def get_llm_model_configs() -> list[ModelConfig]:
@@ -651,8 +705,14 @@ def get_model_load_func(config: ModelConfig):
     if config.engine == "qwen_custom_voice":
         return lambda: get_tts_backend_for_engine(config.engine).load_model(config.model_size)
 
+    if config.engine == "qwen_voice_design":
+        return lambda: get_tts_backend_for_engine(config.engine).load_model(config.model_size)
+
     if config.engine == "qwen_llm":
         return lambda: llm_service.get_llm_model().load_model(config.model_size)
+
+    if config.engine == "tada":
+        return lambda: get_tts_backend_for_engine(config.engine).load_model(config.model_size)
 
     return lambda: get_tts_backend_for_engine(config.engine).load_model()
 
@@ -720,9 +780,19 @@ def get_tts_backend_for_engine(engine: str) -> TTSBackend:
 
             backend = KokoroTTSBackend()
         elif engine == "qwen_custom_voice":
-            from .qwen_custom_voice_backend import QwenCustomVoiceBackend
+            backend_type = get_backend_type()
+            if backend_type == "mlx":
+                from .qwen_custom_voice_mlx_backend import QwenCustomVoiceMLXBackend
 
-            backend = QwenCustomVoiceBackend()
+                backend = QwenCustomVoiceMLXBackend()
+            else:
+                from .qwen_custom_voice_backend import QwenCustomVoiceBackend
+
+                backend = QwenCustomVoiceBackend()
+        elif engine == "qwen_voice_design":
+            from .qwen_voice_design_backend import QwenVoiceDesignBackend
+
+            backend = QwenVoiceDesignBackend()
         else:
             raise ValueError(f"Unknown TTS engine: {engine}. Supported: {list(TTS_ENGINES.keys())}")
 

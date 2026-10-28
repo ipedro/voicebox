@@ -1,6 +1,5 @@
 """Transcription endpoints."""
 
-import asyncio
 import tempfile
 from pathlib import Path
 
@@ -9,15 +8,12 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from .. import models
 from ..services import transcribe
 from ..services.task_queue import create_background_task
+from ..utils.audio import ALLOWED_AUDIO_EXTS
 from ..utils.tasks import get_task_manager
 
 router = APIRouter()
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
-
-# Same set profiles.py accepts for voice samples. librosa picks its decoder from the
-# file extension, so the temp file has to keep the uploaded one.
-ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".webm", ".opus"}
 
 
 @router.post("/transcribe", response_model=models.TranscriptionResponse)
@@ -36,23 +32,19 @@ async def transcribe_audio(
         tmp_path = tmp.name
 
     stt_path = tmp_path
+    stt_path_is_temp = False
     try:
-        from ..utils.audio import load_audio, save_audio
         from ..backends import WHISPER_HF_REPOS
-
-        audio, sr = await asyncio.to_thread(load_audio, tmp_path)
-        duration = len(audio) / sr
+        from ..utils.audio import prepare_for_stt
 
         # The STT backend (mlx_audio.stt -> miniaudio) only decodes
         # WAV/FLAC/MP3/Vorbis, so browser recordings uploaded as WebM/Opus
         # fail with "unsupported file format" (issue: web-mode dictation).
-        # librosa already decoded the file above (it falls back to
-        # audioread/ffmpeg for exotic containers), so re-encode that PCM to a
-        # temp WAV and hand *that* to Whisper. WAV inputs pass through
-        # unchanged.
-        if file_suffix != ".wav":
-            stt_path = f"{tmp_path}.stt.wav"
-            await asyncio.to_thread(save_audio, audio, stt_path, sr)
+        # prepare_for_stt decodes via librosa (falls back to audioread/
+        # ffmpeg for exotic containers) and re-encodes to a temp WAV for
+        # anything that isn't already one; WAV inputs pass through unchanged.
+        audio, sr, stt_path, stt_path_is_temp = await prepare_for_stt(tmp_path)
+        duration = len(audio) / sr
 
         whisper_model = transcribe.get_whisper_model()
         model_size = model if model else whisper_model.model_size
@@ -101,5 +93,5 @@ async def transcribe_audio(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         Path(tmp_path).unlink(missing_ok=True)
-        if stt_path != tmp_path:
+        if stt_path_is_temp:
             Path(stt_path).unlink(missing_ok=True)

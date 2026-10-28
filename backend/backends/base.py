@@ -5,6 +5,8 @@ Eliminates duplication of cache checking, device detection,
 voice prompt combination, and model loading progress tracking.
 """
 
+import asyncio
+import concurrent.futures
 import logging
 import platform
 from contextlib import contextmanager
@@ -19,6 +21,29 @@ from ..utils.hf_progress import HFProgressTracker, create_hf_progress_callback
 from ..utils.tasks import get_task_manager
 
 logger = logging.getLogger(__name__)
+
+# MLX binds its Metal/GPU stream to whichever OS thread first touches it.
+# asyncio.to_thread() dispatches to the process-wide *shared* default
+# ThreadPoolExecutor -- any other endpoint's blocking work (profile
+# uploads, effects processing, model migration, MCP tool calls) can also
+# land on that pool and grow it past 1 worker, independently of anything
+# the MLX backends do. Once that happens, a later MLX call can be handed
+# to a "fresh" thread that never initialized an MLX stream and crashes
+# with "RuntimeError: There is no Stream(gpu, N) in current thread"
+# (sometimes escalating to a fatal Metal exception that kills the
+# process).
+#
+# Every MLX-touching call -- TTS/STT (mlx_backend.py) and LLM
+# (qwen_llm_backend.py) alike -- must go through this ONE shared,
+# single-worker executor rather than each having its own. A second
+# dedicated executor would still put MLX work on two distinct OS
+# threads, which is the exact hazard this exists to eliminate.
+mlx_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-worker")
+
+
+async def run_on_mlx_thread(func, *args):
+    """Run func(*args) on the single dedicated MLX worker thread."""
+    return await asyncio.get_running_loop().run_in_executor(mlx_executor, func, *args)
 
 
 def is_model_cached(

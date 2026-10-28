@@ -134,6 +134,14 @@ async def update_generation_status(
         generation.duration = duration
     if error is not None:
         generation.error = error
+    elif status == "completed":
+        # A successful run may be completing a row that still carries an
+        # error from an earlier attempt (e.g. the startup sweep in app.py
+        # that marks interrupted "generating"/"loading_model" rows failed
+        # with "Server was shut down during generation"). Callers that
+        # reach "completed" never pass `error`, so without this the stale
+        # text survives into an otherwise fully successful generation.
+        generation.error = None
 
     db.commit()
     db.refresh(generation)

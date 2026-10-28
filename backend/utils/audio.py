@@ -2,10 +2,19 @@
 Audio processing utilities.
 """
 
+import asyncio
+import tempfile
+from pathlib import Path
+from typing import Optional, Tuple
+
+import librosa
 import numpy as np
 import soundfile as sf
-import librosa
-from typing import Tuple, Optional
+
+# Extensions accepted for uploaded audio (voice samples, transcription
+# uploads). librosa picks its decoder from the file extension, so any temp
+# file written from an upload has to keep it.
+ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".webm", ".opus"}
 
 
 def normalize_audio(
@@ -110,19 +119,89 @@ def save_audio(
         raise OSError(f"Failed to save audio to {path}: {e}") from e
 
 
+async def prepare_for_stt(path: str) -> tuple[np.ndarray, int, str, bool]:
+    """
+    Decode ``path`` and, unless it's already a WAV, re-encode it to a temp
+    WAV the STT backend's decoder can read.
+
+    The STT backend (mlx_audio.stt -> miniaudio) only decodes WAV/FLAC/MP3/
+    Vorbis directly -- not every format librosa/soundfile can read (e.g.
+    Opus). Decode once here via ``load_audio`` (librosa, with its
+    audioread/ffmpeg fallback for exotic containers) and, if the source
+    isn't a WAV, write that decoded PCM back out as WAV so the STT backend
+    always gets something it can open natively.
+
+    Args:
+        path: Path to the source audio file.
+
+    Returns:
+        Tuple of (audio, sample_rate, stt_path, is_temp). ``stt_path`` is
+        ``path`` unchanged when no re-encode was needed (``is_temp=False``),
+        or a freshly created temp WAV (``is_temp=True``) that the caller
+        owns and must remove (e.g. in a ``finally`` block).
+    """
+    # This is plain CPU-bound librosa/soundfile decoding, not an MLX call --
+    # it must not go through run_on_mlx_thread/mlx_executor (backends/base.py).
+    # Routing ordinary audio decoding through that single-worker executor
+    # would serialize it behind MLX inference for no reason.
+    audio, sr = await asyncio.to_thread(load_audio, path)
+
+    if Path(path).suffix.lower() == ".wav":
+        return audio, sr, path, False
+
+    # A dedicated tempfile, not a path derived from `path` (e.g. `path +
+    # ".stt.wav"`) -- this helper is also called with arbitrary caller-
+    # supplied paths (MCP tool), which could point anywhere, including a
+    # read-only directory. Writing beside the source file isn't safe there.
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        stt_path = tmp.name
+
+    try:
+        await asyncio.to_thread(save_audio, audio, stt_path, sr)
+    except Exception:
+        # Caller only learns about (and cleans up) stt_path on a successful
+        # return -- if the write itself fails, the empty temp file would
+        # otherwise leak.
+        Path(stt_path).unlink(missing_ok=True)
+        raise
+    return audio, sr, stt_path, True
+
+
 def has_tts_runaway(
     audio: np.ndarray,
     sample_rate: int = 24000,
     frame_ms: int = 20,
     silence_threshold_db: float = -40.0,
     max_internal_silence_ms: int = 2000,
+    noise_window_ms: int = 300,
+    noise_zcr_ratio: float = 2.5,
+    min_noise_run_ms: int = 1200,
 ) -> bool:
-    """Detect speech followed by a long silence and then more output.
+    """Detect a TTS model that missed EOS and kept generating.
 
-    This shape is a reliable signal that a TTS model missed EOS and resumed
-    with hallucinated speech or codec noise. Leading and trailing silence do
-    not count because they are not bounded by non-silent audio.
+    Two independent shapes both indicate this failure:
+      1. speech -> long internal silence -> more output. The model
+         restarted after a false stop. Leading and trailing silence do
+         not count because they are not bounded by non-silent audio.
+      2. speech -> a sustained run of noise-like audio with NO silence
+         gap at all. The model overran straight into codec garbage: RMS
+         energy stays high (it's not silence) but zero-crossing rate is
+         far above this clip's own speech baseline, since noise lacks
+         the phoneme-driven ZCR variation of real speech. Shape (1)'s
+         energy-only check can't see this at all.
     """
+    if _has_internal_silence_gap(audio, sample_rate, frame_ms, silence_threshold_db, max_internal_silence_ms):
+        return True
+    return _has_noise_tail(audio, sample_rate, noise_window_ms, silence_threshold_db, noise_zcr_ratio, min_noise_run_ms)
+
+
+def _has_internal_silence_gap(
+    audio: np.ndarray,
+    sample_rate: int,
+    frame_ms: int,
+    silence_threshold_db: float,
+    max_internal_silence_ms: int,
+) -> bool:
     frame_len = int(sample_rate * frame_ms / 1000)
     if frame_len == 0 or len(audio) < frame_len:
         return False
@@ -143,6 +222,62 @@ def has_tts_runaway(
             consecutive_silence = 0
         elif seen_speech:
             consecutive_silence += 1
+
+    return False
+
+
+def _has_noise_tail(
+    audio: np.ndarray,
+    sample_rate: int,
+    window_ms: int,
+    silence_threshold_db: float,
+    noise_zcr_ratio: float,
+    min_run_ms: int,
+) -> bool:
+    """Flag a sustained run of anomalously high zero-crossing-rate audio.
+
+    Zero-crossing rate is measured over windows wide enough (300ms) to
+    average out the frame-to-frame jitter that makes ZCR noisy at 20ms
+    resolution — at that short a grain, codec-noise ZCR spikes for only
+    2-3 frames at a time and never reads as "sustained" even though the
+    underlying corruption is continuous.
+    """
+    win_len = int(sample_rate * window_ms / 1000)
+    if win_len == 0 or len(audio) < win_len:
+        return False
+
+    n_windows = len(audio) // win_len
+    threshold_linear = 10 ** (silence_threshold_db / 20)
+    min_run_windows = max(1, int(min_run_ms / window_ms))
+
+    # Baseline ZCR is established from this clip's own first second or so
+    # of real speech, since corrupted output only ever appears after some
+    # genuine speech has already been generated.
+    baseline_zcrs: list[float] = []
+    baseline_zcr: Optional[float] = None
+    consecutive_noise = 0
+
+    for i in range(n_windows):
+        window = audio[i * win_len : (i + 1) * win_len]
+        rms = np.sqrt(np.mean(window**2))
+        if rms < threshold_linear:
+            consecutive_noise = 0
+            continue
+
+        zcr = np.mean(np.abs(np.diff(np.sign(window)))) / 2
+
+        if baseline_zcr is None:
+            baseline_zcrs.append(zcr)
+            if len(baseline_zcrs) >= min_run_windows:
+                baseline_zcr = float(np.median(baseline_zcrs))
+            continue
+
+        if zcr >= max(baseline_zcr * noise_zcr_ratio, 0.2):
+            consecutive_noise += 1
+            if consecutive_noise >= min_run_windows:
+                return True
+        else:
+            consecutive_noise = 0
 
     return False
 
